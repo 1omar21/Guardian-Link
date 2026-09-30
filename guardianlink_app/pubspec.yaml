@@ -1,0 +1,91 @@
+name: guardianlink_app
+description: "GuardianLink - child safety app with location tracking, safety alerts and a gamified rewards dashboard"
+publish_to: 'none'
+
+version: 1.0.26+40
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # UI & Icons
+  cupertino_icons: ^1.0.6
+  
+  # State Management
+  provider: ^6.1.1
+  
+  # Firebase
+  firebase_core: ^2.24.2
+  firebase_auth: ^4.16.0
+  cloud_firestore: ^4.14.0
+  firebase_storage: ^11.6.0
+  firebase_messaging: ^14.7.10
+  
+  # Location & Maps
+  google_maps_flutter: ^2.5.0
+  geolocator: ^10.1.0
+  location: ^5.0.3
+  
+  # API & Networking
+  http: ^1.2.0
+  dio: ^5.4.0
+  
+  # Monitoring & Permissions
+  flutter_foreground_task: ^6.1.2
+  permission_handler: ^11.1.0
+  # device_apps removed - discontinued package
+  # usage_stats removed - implemented custom UsageStatsManager in MainActivity.kt
+  
+  
+  # UI & Animations
+  lottie: ^3.0.0
+  shimmer: ^3.0.0
+  fl_chart: ^0.66.0
+  animations: ^2.0.11
+  
+  # Storage
+  shared_preferences: ^2.2.2
+  
+  # Utils
+  intl: ^0.18.1
+  uuid: ^4.3.3
+  timeago: ^3.6.0
+  
+  # JWT & Auth
+  jwt_decoder: ^2.0.1
+  
+  # Image Handling
+  cached_network_image: ^3.3.1
+  image_picker: ^1.0.7
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  flutter_lints: ^3.0.0
+  flutter_launcher_icons: ^0.13.1
+
+flutter_launcher_icons:
+  android: true
+  ios: false
+  image_path: "assets/icon/app_icon.png"
+  adaptive_icon_background: "#2196F3"
+  adaptive_icon_foreground: "assets/icon/app_icon.png"
+
+flutter:
+  uses-material-design: true
+
+  # Add assets
+  assets:
+    - assets/icon/
+
+  # Add custom fonts
+  # fonts:
+  #   - family: CustomFont
+  #     fonts:
+  #       - asset: fonts/CustomFont-Regular.ttf
+  #       - asset: fonts/CustomFont-Bold.ttf
+  #         weight: 700
