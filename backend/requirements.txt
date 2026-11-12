@@ -1,27 +1,24 @@
 # FastAPI and Web Framework
 fastapi
-uvicorn[standard]
+uvicorn
 python-multipart
 
 # Configuration and Environment
 python-dotenv
 pydantic
 pydantic-settings
+pydantic[email]
+email-validator
 
 # Firebase Integration
 firebase-admin
 
 # Authentication and Security
 python-jose[cryptography]
-passlib[bcrypt]
-PyJWT
+bcrypt
 
 # HTTP Client
 httpx
-requests
-
-# Database and ORM
-sqlalchemy
 
 # Testing
 pytest

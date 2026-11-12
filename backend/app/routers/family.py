@@ -1,11 +1,11 @@
 from fastapi import APIRouter, HTTPException, status, Depends
 from app.middleware.auth import get_current_user
-from app.services.firebase_service import FirebaseService
+from app.services.firebase_service import get_firebase_service
 from pydantic import BaseModel, EmailStr
 from typing import List
 
 router = APIRouter()
-firebase_service = FirebaseService()
+firebase_service = get_firebase_service()
 
 
 class SendInvitationRequest(BaseModel):

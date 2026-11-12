@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../../../core/services/fcm_service.dart';
 import '../../../core/services/auth_provider.dart';
 import '../../../core/providers/theme_provider.dart';
 import '../../../core/services/api_service.dart';
@@ -8,6 +11,8 @@ import '../../../models/user_model.dart';
 import 'family_management_screen.dart';
 import 'parent_location_screen.dart';
 import 'parent_checkins_screen.dart';
+import 'parent_alerts_screen.dart';
+import 'browsing_history_screen.dart';
 
 class ParentHomeScreen extends StatefulWidget {
   const ParentHomeScreen({super.key});
@@ -21,39 +26,138 @@ class _ParentHomeScreenState extends State<ParentHomeScreen> {
   List<Task> _tasks = [];
   List<Map<String, dynamic>> _children = [];
   bool _isLoading = true;
+  int _activeSos = 0;
+  int _recentZoneEvents = 0;
+  Timer? _alertsTimer;
+  StreamSubscription? _pushSubscription;
 
   @override
   void initState() {
     super.initState();
     _loadData();
+    // Keep the SOS banner current even if a push is missed.
+    _alertsTimer = Timer.periodic(const Duration(seconds: 30), (_) => _loadAlerts());
+    // Any push (SOS, zone, task update) -> refresh the dashboard.
+    _pushSubscription = FCMService().messages.listen((_) => _loadData());
+    // App opened by tapping a notification while it was closed.
+    WidgetsBinding.instance.addPostFrameCallback((_) => FCMService().consumePendingOpen());
+  }
+
+  @override
+  void dispose() {
+    _alertsTimer?.cancel();
+    _pushSubscription?.cancel();
+    super.dispose();
   }
 
   Future<void> _loadData() async {
     await Future.wait([
       _loadTasks(),
       _loadChildren(),
+      _loadAlerts(),
     ]);
   }
 
   Future<void> _loadTasks() async {
     try {
       final tasks = await _apiService.getTasks();
+      if (!mounted) return;
       setState(() {
         _tasks = tasks;
         _isLoading = false;
       });
     } catch (e) {
       print('Load tasks error: $e');
-      setState(() => _isLoading = false);
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
   Future<void> _loadChildren() async {
     try {
       final children = await _apiService.getChildren();
-      setState(() => _children = children);
+      if (mounted) setState(() => _children = children);
     } catch (e) {
       print('Load children error: $e');
+    }
+  }
+
+  Future<void> _loadAlerts() async {
+    try {
+      final alerts = await _apiService.getAlerts(days: 1);
+      if (!mounted) return;
+      setState(() {
+        _activeSos = (alerts['active_sos_count'] as num?)?.toInt() ?? 0;
+        _recentZoneEvents = (alerts['geofence_events'] as List?)?.length ?? 0;
+      });
+    } catch (e) {
+      print('Load alerts error: $e');
+    }
+  }
+
+  Future<void> _openAlerts() async {
+    await Navigator.push(context, MaterialPageRoute(builder: (_) => const ParentAlertsScreen()));
+    _loadAlerts();
+  }
+
+  void _openBrowsing(Map<String, dynamic> child) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => BrowsingHistoryScreen(
+          childId: child['id'],
+          childName: child['full_name'] ?? child['email'],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _reviewTask(Task task, bool approve) async {
+    String? feedback;
+    if (!approve) {
+      final controller = TextEditingController();
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Not approve this task?'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text('The ${task.rewardCoins} coins (and the sticker) given for "${task.title}" will be taken back.'),
+              const SizedBox(height: 12),
+              TextField(
+                controller: controller,
+                decoration: const InputDecoration(labelText: 'Reason (optional)'),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('Cancel')),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white),
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('Not approve'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true) return;
+      feedback = controller.text;
+    }
+    try {
+      await _apiService.verifyTask(task.id, approved: approve, feedback: feedback);
+      _loadTasks();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(approve ? '✅ Task approved' : 'Task not approved - coins taken back'),
+          backgroundColor: approve ? Colors.green : Colors.orange,
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.toString().replaceFirst('Exception: ', '')), backgroundColor: Colors.red),
+      );
     }
   }
 
@@ -236,7 +340,7 @@ class _ParentHomeScreenState extends State<ParentHomeScreen> {
         _loadTasks();
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('🗑️ Task deleted. Child has been notified.'),
+            content: Text('🗑️ Task deleted. Your child will be notified.'),
             backgroundColor: Colors.grey,
           ),
         );
@@ -278,9 +382,14 @@ class _ParentHomeScreenState extends State<ParentHomeScreen> {
         badgeText = 'Scheduled';
         break;
       case 'completed':
+        badgeColor = Colors.teal;
+        badgeIcon = Icons.hourglass_top;
+        badgeText = 'To review';
+        break;
+      case 'verified':
         badgeColor = Colors.green;
-        badgeIcon = Icons.check_circle;
-        badgeText = 'Completed';
+        badgeIcon = Icons.verified;
+        badgeText = 'Approved';
         break;
       default:
         badgeColor = Colors.grey;
@@ -336,7 +445,9 @@ class _ParentHomeScreenState extends State<ParentHomeScreen> {
               subtitle: Text(child['email'] ?? ''),
               onTap: () {
                 Navigator.pop(context);
-                if (feature == 'check-ins') {
+                if (feature == 'browsing') {
+                  _openBrowsing(child);
+                } else if (feature == 'check-ins') {
                   Navigator.push(
                     context,
                     MaterialPageRoute(
@@ -481,6 +592,36 @@ class _ParentHomeScreenState extends State<ParentHomeScreen> {
                         ),
                       ),
                     ),
+                    const SizedBox(height: 12),
+
+                    // Safety alerts banner
+                    Card(
+                      color: _activeSos > 0 ? Colors.red : Theme.of(context).colorScheme.secondaryContainer,
+                      child: ListTile(
+                        leading: Icon(
+                          _activeSos > 0 ? Icons.sos : Icons.notifications_active,
+                          color: _activeSos > 0 ? Colors.white : null,
+                          size: 32,
+                        ),
+                        title: Text(
+                          _activeSos > 0
+                              ? '$_activeSos active SOS ${_activeSos == 1 ? "alert" : "alerts"}!'
+                              : 'Safety alerts',
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            color: _activeSos > 0 ? Colors.white : null,
+                          ),
+                        ),
+                        subtitle: Text(
+                          _activeSos > 0
+                              ? 'Tap to see where and mark as handled'
+                              : '$_recentZoneEvents safe zone ${_recentZoneEvents == 1 ? "event" : "events"} in the last 24 hours',
+                          style: TextStyle(color: _activeSos > 0 ? Colors.white70 : null),
+                        ),
+                        trailing: Icon(Icons.chevron_right, color: _activeSos > 0 ? Colors.white : null),
+                        onTap: _openAlerts,
+                      ),
+                    ),
                     const SizedBox(height: 24),
 
                   // Children List with Location Access
@@ -512,24 +653,34 @@ class _ParentHomeScreenState extends State<ParentHomeScreen> {
                             style: const TextStyle(fontWeight: FontWeight.bold),
                           ),
                           subtitle: Text(child['email'] ?? ''),
-                          trailing: ElevatedButton.icon(
-                            onPressed: () {
-                              Navigator.push(
-                                context,
-                                MaterialPageRoute(
-                                  builder: (context) => ParentLocationScreen(
-                                    childId: child['id'],
-                                    childName: child['full_name'] ?? child['email'],
-                                  ),
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              IconButton(
+                                tooltip: 'Browsing history',
+                                icon: const Icon(Icons.public),
+                                onPressed: () => _openBrowsing(child),
+                              ),
+                              ElevatedButton.icon(
+                                onPressed: () {
+                                  Navigator.push(
+                                    context,
+                                    MaterialPageRoute(
+                                      builder: (context) => ParentLocationScreen(
+                                        childId: child['id'],
+                                        childName: child['full_name'] ?? child['email'],
+                                      ),
+                                    ),
+                                  );
+                                },
+                                icon: const Icon(Icons.map, size: 18),
+                                label: const Text('Map'),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: Colors.green,
+                                  foregroundColor: Colors.white,
                                 ),
-                              );
-                            },
-                            icon: const Icon(Icons.location_on, size: 18),
-                            label: const Text('Location'),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: Colors.green,
-                              foregroundColor: Colors.white,
-                            ),
+                              ),
+                            ],
                           ),
                         ),
                       );
@@ -580,6 +731,38 @@ class _ParentHomeScreenState extends State<ParentHomeScreen> {
                                       const SizedBox(height: 8),
                                       Text(
                                         'Check-ins',
+                                        style: TextStyle(
+                                          fontWeight: FontWeight.bold,
+                                          color: Theme.of(context).colorScheme.onPrimaryContainer,
+                                        ),
+                                        textAlign: TextAlign.center,
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Card(
+                              color: Theme.of(context).colorScheme.primaryContainer,
+                              child: InkWell(
+                                onTap: () {
+                                  if (_children.length == 1) {
+                                    _openBrowsing(_children[0]);
+                                  } else {
+                                    _showChildSelectionDialog('browsing');
+                                  }
+                                },
+                                child: Padding(
+                                  padding: const EdgeInsets.all(16),
+                                  child: Column(
+                                    children: [
+                                      Icon(Icons.public, size: 32, color: Theme.of(context).colorScheme.primary),
+                                      const SizedBox(height: 8),
+                                      Text(
+                                        'Web history',
                                         style: TextStyle(
                                           fontWeight: FontWeight.bold,
                                           color: Theme.of(context).colorScheme.onPrimaryContainer,
@@ -694,7 +877,7 @@ class _ParentHomeScreenState extends State<ParentHomeScreen> {
                                 margin: const EdgeInsets.only(bottom: 12),
                                 child: ListTile(
                                   leading: CircleAvatar(
-                                    backgroundColor: task.status == 'completed'
+                                    backgroundColor: task.isCompleted
                                         ? Colors.green
                                         : task.status == 'rejected'
                                             ? Colors.red
@@ -702,7 +885,7 @@ class _ParentHomeScreenState extends State<ParentHomeScreen> {
                                                 ? Colors.blue
                                                 : Colors.orange,
                                     child: Icon(
-                                      task.status == 'completed'
+                                      task.isCompleted
                                           ? Icons.check
                                           : task.status == 'rejected'
                                               ? Icons.close
@@ -742,6 +925,39 @@ class _ParentHomeScreenState extends State<ParentHomeScreen> {
                                           ),
                                         ],
                                       ),
+                                      if (task.status == 'rejected' && task.rejectedBy != null)
+                                        Text(
+                                          task.rejectedBy == 'child' ? 'Rejected by your child' : 'Not approved by you',
+                                          style: const TextStyle(fontSize: 12, color: Colors.red),
+                                        ),
+                                      if (task.status == 'completed')
+                                        Padding(
+                                          padding: const EdgeInsets.only(top: 8),
+                                          child: Wrap(
+                                            spacing: 8,
+                                            children: [
+                                              ElevatedButton.icon(
+                                                style: ElevatedButton.styleFrom(
+                                                  backgroundColor: Colors.green,
+                                                  foregroundColor: Colors.white,
+                                                  visualDensity: VisualDensity.compact,
+                                                ),
+                                                onPressed: () => _reviewTask(task, true),
+                                                icon: const Icon(Icons.thumb_up, size: 16),
+                                                label: const Text('Approve'),
+                                              ),
+                                              OutlinedButton.icon(
+                                                style: OutlinedButton.styleFrom(
+                                                  foregroundColor: Colors.red,
+                                                  visualDensity: VisualDensity.compact,
+                                                ),
+                                                onPressed: () => _reviewTask(task, false),
+                                                icon: const Icon(Icons.thumb_down, size: 16),
+                                                label: const Text('Not done'),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
                                     ],
                                   ),
                                   trailing: IconButton(

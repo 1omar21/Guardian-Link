@@ -12,6 +12,7 @@ class TaskStatus(str, Enum):
     SCHEDULED = "scheduled"
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
+    VERIFIED = "verified"
     CANCELLED = "cancelled"
     DELETED = "deleted"
 
@@ -38,12 +39,11 @@ class TaskCreate(TaskBase):
 
 
 class TaskUpdate(BaseModel):
-    """Task update model."""
-    title: Optional[str] = None
+    """Task update model (parent). Status is changed only through the task actions."""
+    title: Optional[str] = Field(default=None, min_length=1, max_length=200)
     description: Optional[str] = None
-    status: Optional[TaskStatus] = None
     priority: Optional[TaskPriority] = None
-    reward_coins: Optional[int] = None
+    reward_coins: Optional[int] = Field(default=None, ge=0, le=1000)
     due_date: Optional[datetime] = None
 
 
@@ -56,6 +56,9 @@ class TaskResponse(TaskBase):
     created_at: datetime
     updated_at: datetime
     completed_at: Optional[datetime] = None
+    rejected_by: Optional[str] = None  # 'child' or 'parent'
+    verification_feedback: Optional[str] = None
+    rejection_feedback: Optional[str] = None
     
     class Config:
         from_attributes = True
@@ -72,3 +75,8 @@ class TaskVerificationRequest(BaseModel):
     task_id: str
     approved: bool
     feedback: Optional[str] = None
+
+
+class TaskScheduleRequest(BaseModel):
+    """Child schedules a task for later. Send ISO-8601 (UTC recommended)."""
+    scheduled_for: datetime

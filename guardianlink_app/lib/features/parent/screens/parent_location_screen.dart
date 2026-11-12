@@ -1,11 +1,18 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:latlong2/latlong.dart';
+
 import '../../../core/services/location_service.dart';
-import 'package:geolocator/geolocator.dart';
+import '../../../core/utils/time_format.dart';
+import '../../../core/widgets/safety_map.dart';
+import 'browsing_history_screen.dart';
+import 'parent_alerts_screen.dart';
 
 class ParentLocationScreen extends StatefulWidget {
   final String childId;
   final String childName;
-  
+
   const ParentLocationScreen({
     Key? key,
     required this.childId,
@@ -17,121 +24,183 @@ class ParentLocationScreen extends StatefulWidget {
 }
 
 class _ParentLocationScreenState extends State<ParentLocationScreen> {
+  static const Duration _refreshEvery = Duration(seconds: 20);
+
   final LocationService _locationService = LocationService();
-  
+
   bool _isLoading = true;
   Map<String, dynamic>? _childLocation;
   List<Map<String, dynamic>> _geofences = [];
-  List<Map<String, dynamic>> _locationHistory = [];
   List<Map<String, dynamic>> _checkIns = [];
-  
+  Timer? _refreshTimer;
+
+  // Placing a new safe zone on the map
+  bool _placingZone = false;
+  LatLng? _draftCenter;
+  double _draftRadius = 200;
+
   @override
   void initState() {
     super.initState();
     _loadData();
+    // Near real-time: the child's phone uploads about once a minute while moving.
+    _refreshTimer = Timer.periodic(_refreshEvery, (_) {
+      if (!_placingZone) _loadData(silent: true);
+    });
   }
-  
-  Future<void> _loadData() async {
-    setState(() => _isLoading = true);
-    
+
+  @override
+  void dispose() {
+    _refreshTimer?.cancel();
+    super.dispose();
+  }
+
+  LatLng? get _childLatLng {
+    final lat = toDouble(_childLocation?['latitude']);
+    final lng = toDouble(_childLocation?['longitude']);
+    return lat == null || lng == null ? null : LatLng(lat, lng);
+  }
+
+  Future<void> _loadData({bool silent = false}) async {
+    if (!silent) setState(() => _isLoading = true);
     try {
-      final location = await _locationService.getChildLocation(widget.childId);
-      final geofences = await _locationService.getGeofences();
-      final checkIns = await _locationService.getCheckIns(widget.childId);
-      
+      final results = await Future.wait([
+        _locationService.getChildLocation(widget.childId),
+        _locationService.getGeofences(),
+        _locationService.getCheckIns(widget.childId),
+      ]);
+      if (!mounted) return;
       setState(() {
-        _childLocation = location;
-        _geofences = geofences;
-        _checkIns = checkIns;
+        _childLocation = results[0] as Map<String, dynamic>?;
+        _geofences = results[1] as List<Map<String, dynamic>>;
+        _checkIns = results[2] as List<Map<String, dynamic>>;
         _isLoading = false;
       });
     } catch (e) {
       print('Error loading location data: $e');
-      setState(() => _isLoading = false);
+      if (mounted) setState(() => _isLoading = false);
     }
   }
-  
-  Future<void> _createGeofence() async {
-    if (_childLocation == null) {
+
+  void _startPlacingZone() {
+    setState(() {
+      _placingZone = true;
+      _draftCenter = _childLatLng;
+      _draftRadius = 200;
+    });
+  }
+
+  void _cancelPlacingZone() {
+    setState(() {
+      _placingZone = false;
+      _draftCenter = null;
+    });
+  }
+
+  Future<void> _saveZone() async {
+    final center = _draftCenter;
+    if (center == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No location available')),
+        const SnackBar(content: Text('Tap the map to choose the centre of the safe zone')),
       );
       return;
     }
-    
     final nameController = TextEditingController();
-    final radiusController = TextEditingController(text: '500');
-    
-    final result = await showDialog<bool>(
+    final name = await showDialog<String>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Create Safe Zone'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: nameController,
-              decoration: const InputDecoration(
-                labelText: 'Zone Name',
-                hintText: 'e.g., Home, School',
-              ),
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: radiusController,
-              keyboardType: TextInputType.number,
-              decoration: const InputDecoration(
-                labelText: 'Radius (meters)',
-                hintText: '500',
-              ),
-            ),
-          ],
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Name this safe zone'),
+        content: TextField(
+          controller: nameController,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: 'Zone name', hintText: 'e.g. Home, School'),
         ),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
+          TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('Cancel')),
           ElevatedButton(
-            onPressed: () async {
-              if (nameController.text.isEmpty) return;
-              
-              final success = await _locationService.createGeofence(
-                name: nameController.text,
-                latitude: _childLocation!['latitude'],
-                longitude: _childLocation!['longitude'],
-                radius: int.tryParse(radiusController.text) ?? 500,
-              );
-              
-              Navigator.pop(context, success);
-            },
-            child: const Text('Create'),
+            onPressed: () => Navigator.pop(dialogContext, nameController.text.trim()),
+            child: const Text('Save'),
           ),
         ],
       ),
     );
-    
-    if (result == true) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('✅ Safe zone created successfully'),
-          backgroundColor: Colors.green,
-        ),
-      );
-      await _loadData();
+    if (name == null || name.isEmpty || !mounted) return;
+
+    final success = await _locationService.createGeofence(
+      name: name,
+      latitude: center.latitude,
+      longitude: center.longitude,
+      radius: _draftRadius.round(),
+    );
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(success
+            ? '✅ Safe zone "$name" created. You will be alerted when ${widget.childName} arrives or leaves.'
+            : '❌ Could not create the safe zone'),
+        backgroundColor: success ? Colors.green : Colors.red,
+      ),
+    );
+    if (success) {
+      _cancelPlacingZone();
+      _loadData(silent: true);
     }
   }
-  
+
+  Future<void> _deleteZone(Map<String, dynamic> zone) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Delete safe zone'),
+        content: Text('Delete "${zone['name']}"? You will no longer get alerts for it.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('Cancel')),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white),
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+    final ok = await _locationService.deleteGeofence(zone['id']);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(ok ? 'Safe zone deleted' : 'Could not delete the safe zone')),
+    );
+    if (ok) _loadData(silent: true);
+  }
+
   @override
   Widget build(BuildContext context) {
+    final child = _childLatLng;
+    final updatedAt = parseTime(_childLocation?['timestamp']);
+    final isStale = updatedAt == null || DateTime.now().difference(updatedAt) > const Duration(minutes: 15);
+
     return Scaffold(
       appBar: AppBar(
         title: Text('${widget.childName}\'s Location'),
         actions: [
           IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: _loadData,
+            icon: const Icon(Icons.notifications_active),
+            tooltip: 'Safety alerts',
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const ParentAlertsScreen()),
+            ),
           ),
+          IconButton(
+            icon: const Icon(Icons.public),
+            tooltip: 'Browsing history',
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => BrowsingHistoryScreen(childId: widget.childId, childName: widget.childName),
+              ),
+            ),
+          ),
+          IconButton(icon: const Icon(Icons.refresh), onPressed: _loadData),
         ],
       ),
       body: _isLoading
@@ -140,11 +209,64 @@ class _ParentLocationScreenState extends State<ParentLocationScreen> {
               onRefresh: _loadData,
               child: ListView(
                 padding: const EdgeInsets.all(16),
+                physics: _placingZone ? const NeverScrollableScrollPhysics() : null,
                 children: [
+                  if (_placingZone)
+                    Card(
+                      color: Colors.orange.shade50,
+                      child: Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text('Tap the map to place the safe zone',
+                                style: TextStyle(fontWeight: FontWeight.bold)),
+                            Row(children: [
+                              const Text('Radius'),
+                              Expanded(
+                                child: Slider(
+                                  value: _draftRadius,
+                                  min: 50,
+                                  max: 2000,
+                                  divisions: 39,
+                                  label: '${_draftRadius.round()} m',
+                                  onChanged: (v) => setState(() => _draftRadius = v),
+                                ),
+                              ),
+                              Text('${_draftRadius.round()} m'),
+                            ]),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.end,
+                              children: [
+                                TextButton(onPressed: _cancelPlacingZone, child: const Text('Cancel')),
+                                const SizedBox(width: 8),
+                                ElevatedButton.icon(
+                                  onPressed: _saveZone,
+                                  icon: const Icon(Icons.check),
+                                  label: const Text('Save zone'),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+
+                  // Map
+                  SafetyMap(
+                    person: child,
+                    zones: _geofences,
+                    draftCenter: _placingZone ? _draftCenter : null,
+                    draftRadius: _draftRadius,
+                    onTap: _placingZone ? (point) => setState(() => _draftCenter = point) : null,
+                    height: 320,
+                  ),
+                  const SizedBox(height: 12),
+
                   // Child's Current Location
                   Card(
                     child: Padding(
-                      padding: const EdgeInsets.all(20),
+                      padding: const EdgeInsets.all(16),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
@@ -152,47 +274,40 @@ class _ParentLocationScreenState extends State<ParentLocationScreen> {
                             children: [
                               const Icon(Icons.person_pin_circle, color: Colors.blue),
                               const SizedBox(width: 8),
-                              Text(
-                                '${widget.childName}\'s Location',
-                                style: const TextStyle(
-                                  fontSize: 18,
-                                  fontWeight: FontWeight.bold,
+                              Expanded(
+                                child: Text(
+                                  '${widget.childName}\'s Location',
+                                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                                 ),
                               ),
                             ],
                           ),
-                          const SizedBox(height: 16),
+                          const SizedBox(height: 12),
                           if (_childLocation != null) ...[
-                            _buildInfoRow('Latitude', _childLocation!['latitude'].toStringAsFixed(6)),
-                            const SizedBox(height: 8),
-                            _buildInfoRow('Longitude', _childLocation!['longitude'].toStringAsFixed(6)),
-                            const SizedBox(height: 8),
-                            _buildInfoRow('Accuracy', '${_childLocation!['accuracy']?.toStringAsFixed(1) ?? 'N/A'}m'),
-                            const SizedBox(height: 8),
-                            _buildInfoRow('Last Updated', _formatTimestamp(_childLocation!['timestamp'])),
-                            const SizedBox(height: 16),
-                            ElevatedButton.icon(
-                              onPressed: _createGeofence,
-                              icon: const Icon(Icons.add_location),
-                              label: const Text('Create Safe Zone Here'),
-                              style: ElevatedButton.styleFrom(
-                                minimumSize: const Size(double.infinity, 48),
+                            _buildInfoRow('Last updated', timeAgo(_childLocation!['timestamp'])),
+                            const SizedBox(height: 6),
+                            _buildInfoRow('Accuracy',
+                                '${toDouble(_childLocation!['accuracy'])?.toStringAsFixed(0) ?? 'N/A'} m'),
+                            const SizedBox(height: 6),
+                            _buildInfoRow('Coordinates',
+                                '${child!.latitude.toStringAsFixed(5)}, ${child.longitude.toStringAsFixed(5)}'),
+                            if (isStale) ...[
+                              const SizedBox(height: 8),
+                              Text(
+                                'This location is more than 15 minutes old. ${widget.childName}\'s phone may be '
+                                'offline, have location turned off, or location sharing stopped.',
+                                style: TextStyle(fontSize: 12, color: Colors.orange.shade800),
                               ),
-                            ),
+                            ],
                           ] else
-                            const Center(
-                              child: Padding(
-                                padding: EdgeInsets.all(16),
-                                child: Text('No location data available'),
-                              ),
-                            ),
+                            const Text('No location yet. Ask your child to open GuardianLink and allow location.'),
                         ],
                       ),
                     ),
                   ),
-                  
+
                   const SizedBox(height: 16),
-                  
+
                   // Safe Zones
                   Card(
                     child: Padding(
@@ -203,85 +318,71 @@ class _ParentLocationScreenState extends State<ParentLocationScreen> {
                           Row(
                             mainAxisAlignment: MainAxisAlignment.spaceBetween,
                             children: [
-                              Row(
-                                children: const [
+                              const Row(
+                                children: [
                                   Icon(Icons.place, color: Colors.orange),
                                   SizedBox(width: 8),
-                                  Text(
-                                    'Safe Zones',
-                                    style: TextStyle(
-                                      fontSize: 18,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
+                                  Text('Safe Zones', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
                                 ],
                               ),
-                              TextButton.icon(
-                                onPressed: _createGeofence,
-                                icon: const Icon(Icons.add),
-                                label: const Text('Add'),
-                              ),
+                              if (!_placingZone)
+                                TextButton.icon(
+                                  onPressed: _startPlacingZone,
+                                  icon: const Icon(Icons.add),
+                                  label: const Text('Add'),
+                                ),
                             ],
                           ),
-                          const SizedBox(height: 16),
+                          const Text(
+                            'You get a notification when your child arrives at or leaves a safe zone.',
+                            style: TextStyle(fontSize: 12, color: Colors.grey),
+                          ),
+                          const SizedBox(height: 12),
                           if (_geofences.isEmpty)
                             const Center(
                               child: Padding(
                                 padding: EdgeInsets.all(16),
-                                child: Text('No safe zones yet'),
+                                child: Text('No safe zones yet. Tap "Add" and pick a place on the map.'),
                               ),
                             )
                           else
                             ..._geofences.map((zone) {
-                              final distance = _childLocation != null
+                              final zoneLat = toDouble(zone['latitude']);
+                              final zoneLng = toDouble(zone['longitude']);
+                              final radius = toDouble(zone['radius']) ?? 0;
+                              final distance = child != null && zoneLat != null && zoneLng != null
                                   ? _locationService.calculateDistance(
-                                      _childLocation!['latitude'],
-                                      _childLocation!['longitude'],
-                                      zone['latitude'],
-                                      zone['longitude'],
-                                    )
+                                      child.latitude, child.longitude, zoneLat, zoneLng)
                                   : null;
-                              
-                              final isInside = distance != null && distance <= zone['radius'];
-                              
+                              final isInside = distance != null && distance <= radius;
+
                               return Card(
                                 color: isInside ? Colors.green[50] : null,
                                 child: ListTile(
                                   leading: Icon(
-                                    Icons.location_city,
+                                    isInside ? Icons.check_circle : Icons.location_city,
                                     color: isInside ? Colors.green : Colors.orange,
                                   ),
                                   title: Text(zone['name'] ?? 'Unknown'),
-                                  subtitle: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    children: [
-                                      Text('Radius: ${zone['radius']}m'),
-                                      if (distance != null)
-                                        Text(
-                                          isInside
-                                              ? '✅ Child is inside'
-                                              : '${distance.toStringAsFixed(0)}m away',
-                                          style: TextStyle(
-                                            color: isInside ? Colors.green : Colors.grey,
-                                            fontWeight: isInside ? FontWeight.bold : FontWeight.normal,
-                                          ),
-                                        ),
-                                    ],
+                                  subtitle: Text(
+                                    'Radius ${radius.round()} m · '
+                                    '${distance == null ? 'distance unknown' : isInside ? 'child is inside' : '${distance.toStringAsFixed(0)} m away'}',
                                   ),
-                                  trailing: Icon(
-                                    isInside ? Icons.check_circle : Icons.circle_outlined,
-                                    color: isInside ? Colors.green : Colors.grey,
+                                  trailing: IconButton(
+                                    icon: const Icon(Icons.delete_outline),
+                                    tooltip: 'Delete zone',
+                                    onPressed: () => _deleteZone(zone),
                                   ),
                                 ),
                               );
-                            }).toList(),
+                            }),
                         ],
                       ),
                     ),
                   ),
-                  
+
                   const SizedBox(height: 16),
-                  
+
                   // Check-In History
                   Card(
                     child: Padding(
@@ -289,110 +390,50 @@ class _ParentLocationScreenState extends State<ParentLocationScreen> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Row(
-                            children: const [
+                          const Row(
+                            children: [
                               Icon(Icons.verified_user, color: Colors.green),
                               SizedBox(width: 8),
-                              Text(
-                                'Safety Check-Ins',
-                                style: TextStyle(
-                                  fontSize: 18,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
+                              Text('Safety Check-Ins', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
                             ],
                           ),
-                          const SizedBox(height: 16),
+                          const SizedBox(height: 12),
                           if (_checkIns.isEmpty)
                             const Center(
-                              child: Padding(
-                                padding: EdgeInsets.all(16),
-                                child: Text('No check-ins yet'),
-                              ),
+                              child: Padding(padding: EdgeInsets.all(16), child: Text('No check-ins yet')),
                             )
                           else
-                            ..._checkIns.take(5).map((checkIn) {
-                              return Card(
-                                color: Colors.green[50],
-                                child: ListTile(
+                            ..._checkIns.take(5).map((checkIn) => ListTile(
                                   leading: const CircleAvatar(
                                     backgroundColor: Colors.green,
                                     child: Icon(Icons.check, color: Colors.white),
                                   ),
                                   title: Text(checkIn['message'] ?? 'Check-in'),
-                                  subtitle: Text(
-                                    _formatTimestamp(checkIn['timestamp']),
-                                  ),
-                                  trailing: const Icon(
-                                    Icons.arrow_forward_ios,
-                                    size: 16,
-                                    color: Colors.grey,
-                                  ),
-                                ),
-                              );
-                            }).toList(),
+                                  subtitle: Text(timeAgo(checkIn['timestamp'])),
+                                )),
                         ],
                       ),
                     ),
                   ),
-                  
-                  const SizedBox(height: 16),
-                  
-                  // Info Card
-                  Card(
-                    color: Theme.of(context).colorScheme.primaryContainer,
-                    child: Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Column(
-                        children: [
-                          Icon(Icons.info_outline, color: Theme.of(context).colorScheme.primary),
-                          SizedBox(height: 8),
-                          Text(
-                            'Location updates automatically when your child uses the app',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              fontSize: 14,
-                              color: Theme.of(context).colorScheme.onPrimaryContainer,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Updates automatically every ${_refreshEvery.inSeconds} seconds while this screen is open.',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(fontSize: 12, color: Colors.grey),
                   ),
                 ],
               ),
             ),
     );
   }
-  
+
   Widget _buildInfoRow(String label, String value) {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
-        Text(
-          label,
-          style: const TextStyle(color: Colors.grey),
-        ),
-        Text(
-          value,
-          style: const TextStyle(fontWeight: FontWeight.w500),
-        ),
+        Text(label, style: const TextStyle(color: Colors.grey)),
+        Flexible(child: Text(value, textAlign: TextAlign.end, style: const TextStyle(fontWeight: FontWeight.w500))),
       ],
     );
-  }
-  
-  String _formatTimestamp(dynamic timestamp) {
-    try {
-      final DateTime time = DateTime.parse(timestamp.toString());
-      final now = DateTime.now();
-      final diff = now.difference(time);
-      
-      if (diff.inMinutes < 1) return 'Just now';
-      if (diff.inMinutes < 60) return '${diff.inMinutes}m ago';
-      if (diff.inHours < 24) return '${diff.inHours}h ago';
-      return '${diff.inDays}d ago';
-    } catch (e) {
-      return 'Unknown';
-    }
   }
 }

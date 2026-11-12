@@ -1,30 +1,35 @@
-// This is a basic Flutter widget test.
-//
-// To perform an interaction with a widget in your test, use the WidgetTester
-// utility in the flutter_test package. For example, you can send tap and scroll
-// gestures. You can also use WidgetTester to find child widgets in the widget
-// tree, read text, and verify that the values of widget properties are correct.
-
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:guardianlink_app/main.dart';
+import 'package:guardianlink_app/models/task_model.dart';
+import 'package:guardianlink_app/models/user_model.dart';
 
 void main() {
-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
-    await tester.pumpWidget(const MyApp());
+  test('User.fromJson parses backend user', () {
+    final user = User.fromJson({
+      'id': 'u1',
+      'email': 'kid@example.com',
+      'full_name': 'Kid',
+      'role': 'child',
+      'family_id': 'f1',
+      'focus_coins': 30,
+      'stickers': ['🌟'],
+    });
+    expect(user.isChild, isTrue);
+    expect(user.focusCoins, 30);
+    expect(user.stickers, ['🌟']);
+  });
 
-    // Verify that our counter starts at 0.
-    expect(find.text('0'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
-
-    // Tap the '+' icon and trigger a frame.
-    await tester.tap(find.byIcon(Icons.add));
-    await tester.pump();
-
-    // Verify that our counter has incremented.
-    expect(find.text('0'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
+  test('Task.fromJson parses UTC timestamps and verified status', () {
+    final task = Task.fromJson({
+      'id': 't1',
+      'title': 'Homework',
+      'assigned_to': 'u1',
+      'created_by': 'p1',
+      'status': 'verified',
+      'reward_coins': 10,
+      'created_at': '2026-11-12T08:00:00+00:00',
+    });
+    expect(task.isCompleted, isTrue);
+    expect(task.createdAt.isUtc, isTrue);
   });
 }

@@ -10,18 +10,18 @@ class Settings(BaseSettings):
     api_port: int = 8000
     secret_key: str
     algorithm: str = "HS256"
-    access_token_expire_minutes: int = 30
+    access_token_expire_minutes: int = 60 * 24 * 30  # 30 days; the app has no token refresh
     
     # Firebase Configuration
     firebase_credentials_path: str
-    firebase_database_url: str
+    firebase_database_url: str = ""  # optional; only Firestore is used
     
     # CORS Configuration
     allowed_origins: str = "http://localhost:*"
     
     # Environment
     environment: str = "development"
-    debug: bool = True
+    debug: bool = False
     
     class Config:
         env_file = ".env"

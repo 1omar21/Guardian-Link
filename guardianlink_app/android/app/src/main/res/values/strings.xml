@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="browsing_monitor_label">GuardianLink browsing monitor</string>
+    <string name="browsing_monitor_description">Shares the addresses of websites you open in your web browser (Chrome, Firefox, Edge, Samsung Internet and others) with your parent in GuardianLink. Only browser apps are monitored. Nothing you type, and nothing in other apps, is read. You can turn this off here at any time.</string>
+</resources>

@@ -4,12 +4,14 @@ class Task {
   final String description;
   final String assignedTo;
   final String createdBy;
-  final String status; // 'pending', 'in_progress', 'completed', 'verified'
+  final String status; // pending, accepted, scheduled, in_progress, completed (awaiting review), verified, rejected, deleted
   final String priority; // 'low', 'medium', 'high'
   final int rewardCoins;
   final DateTime? dueDate;
   final DateTime createdAt;
   final DateTime? completedAt;
+  final String? rejectedBy; // 'child' or 'parent'
+  final String? feedback; // parent's note when reviewing
 
   Task({
     required this.id,
@@ -23,6 +25,8 @@ class Task {
     this.dueDate,
     required this.createdAt,
     this.completedAt,
+    this.rejectedBy,
+    this.feedback,
   });
 
   factory Task.fromJson(Map<String, dynamic> json) {
@@ -38,6 +42,8 @@ class Task {
       dueDate: json['due_date'] != null ? DateTime.parse(json['due_date']) : null,
       createdAt: DateTime.parse(json['created_at']),
       completedAt: json['completed_at'] != null ? DateTime.parse(json['completed_at']) : null,
+      rejectedBy: json['rejected_by'],
+      feedback: json['rejection_feedback'] ?? json['verification_feedback'],
     );
   }
 

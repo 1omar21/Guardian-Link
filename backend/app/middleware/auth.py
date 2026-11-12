@@ -1,114 +1,101 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from jose import JWTError, jwt
-from passlib.context import CryptContext
+import bcrypt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from app.config import get_settings
+from app.services.firebase_service import get_firebase_service
 
 settings = get_settings()
-
-# Password hashing
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # JWT token bearer
 security = HTTPBearer()
 
+# bcrypt only uses the first 72 bytes of a password; bcrypt>=5 raises for longer input.
+BCRYPT_MAX_BYTES = 72
 
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify a password against its hash."""
-    return pwd_context.verify(plain_password, hashed_password)
+
+def verify_password(plain_password: str, hashed_password: Optional[str]) -> bool:
+    """Verify a password against its hash. Never raises; returns False on any problem."""
+    if not plain_password or not hashed_password:
+        return False
+    password_bytes = plain_password.encode("utf-8")
+    if len(password_bytes) > BCRYPT_MAX_BYTES:
+        return False
+    try:
+        return bcrypt.checkpw(password_bytes, hashed_password.encode("utf-8"))
+    except (ValueError, TypeError):
+        # Malformed / legacy hash stored in the database
+        return False
 
 
 def get_password_hash(password: str) -> str:
     """Hash a password."""
-    return pwd_context.hash(password)
+    password_bytes = password.encode("utf-8")
+    if len(password_bytes) > BCRYPT_MAX_BYTES:
+        raise ValueError(f"Password must be at most {BCRYPT_MAX_BYTES} bytes")
+    return bcrypt.hashpw(password_bytes, bcrypt.gensalt()).decode("utf-8")
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
-    """
-    Create a JWT access token.
-    
-    Args:
-        data: Data to encode in the token
-        expires_delta: Optional expiration time delta
-    
-    Returns:
-        Encoded JWT token
-    """
+    """Create a signed JWT access token."""
     to_encode = data.copy()
-    
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(minutes=settings.access_token_expire_minutes)
-    
+    expire = datetime.now(timezone.utc) + (
+        expires_delta or timedelta(minutes=settings.access_token_expire_minutes)
+    )
     to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, settings.secret_key, algorithm=settings.algorithm)
-    
-    return encoded_jwt
+    return jwt.encode(to_encode, settings.secret_key, algorithm=settings.algorithm)
+
+
+def _credentials_exception() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
 
 def decode_access_token(token: str) -> dict:
-    """
-    Decode and verify a JWT access token.
-    
-    Args:
-        token: JWT token to decode
-    
-    Returns:
-        Decoded token data
-    
-    Raises:
-        HTTPException: If token is invalid or expired
-    """
+    """Decode and verify a JWT access token."""
     try:
-        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
-        return payload
+        return jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
     except JWTError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Could not validate credentials",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        raise _credentials_exception()
 
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
     """
-    Dependency to get the current authenticated user from JWT token.
-    
-    Args:
-        credentials: HTTP Bearer credentials from request header
-    
-    Returns:
-        User data from token
-    
-    Raises:
-        HTTPException: If token is invalid
+    Resolve the authenticated user.
+
+    The token only proves identity (user_id). Role, family and name are always
+    loaded fresh from Firestore so that changes (e.g. a child joining a family
+    after login) take effect immediately and a deleted user can't keep using
+    an old token.
     """
-    token = credentials.credentials
-    payload = decode_access_token(token)
-    
-    user_id: str = payload.get("user_id")
-    if user_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Could not validate credentials",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    
-    # Return user data from token
+    payload = decode_access_token(credentials.credentials)
+
+    user_id = payload.get("user_id")
+    if not user_id:
+        raise _credentials_exception()
+
+    user = await get_firebase_service().get_user_by_id(user_id)
+    if not user:
+        raise _credentials_exception()
+
     return {
         "id": user_id,
-        "email": payload.get("email"),
-        "role": payload.get("role")
+        "email": user.get("email"),
+        "role": user.get("role"),
+        "family_id": user.get("family_id"),
+        "full_name": user.get("full_name"),
     }
 
 
-async def require_role(required_role: str):
+def require_role(required_role: str):
     """
-    Dependency to require a specific user role.
-    
+    Dependency factory to require a specific user role.
+
     Usage:
         @router.get("/admin")
         async def admin_only(user: dict = Depends(require_role("parent"))):
@@ -121,5 +108,5 @@ async def require_role(required_role: str):
                 detail=f"This endpoint requires {required_role} role"
             )
         return current_user
-    
+
     return role_checker

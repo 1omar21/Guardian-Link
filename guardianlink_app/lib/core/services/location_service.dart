@@ -23,21 +23,9 @@ class LocationService {
       return false;
     }
     
-    if (status.isGranted) {
-      // Request background location for Android 10+
-      var backgroundStatus = await Permission.locationAlways.status;
-      
-      if (backgroundStatus.isDenied) {
-        backgroundStatus = await Permission.locationAlways.request();
-      }
-      
-      if (backgroundStatus.isPermanentlyDenied) {
-        await openAppSettings();
-      }
-      
-      return true;
-    }
-    
+    // "While using the app" is enough: background sharing runs as a visible
+    // foreground service (see LocationTracker), so "Allow all the time" is
+    // never requested.
     return status.isGranted;
   }
 
@@ -67,8 +55,8 @@ class LocationService {
     }
   }
 
-  /// Send location update to backend
-  Future<void> updateLocation(Position position) async {
+  /// Send location update to backend. Returns true on success.
+  Future<bool> updateLocation(Position position) async {
     try {
       final token = await ApiService().getToken();
       
@@ -89,17 +77,19 @@ class LocationService {
           'latitude': position.latitude,
           'longitude': position.longitude,
           'accuracy': position.accuracy,
-          'timestamp': DateTime.now().toIso8601String(),
+          'timestamp': DateTime.now().toUtc().toIso8601String(),
         }),
       );
 
       if (response.statusCode == 201) {
         print('✅ Location updated successfully');
-      } else {
-        print('❌ Location update failed: ${response.statusCode} - ${response.body}');
+        return true;
       }
+      print('❌ Location update failed: ${response.statusCode} - ${response.body}');
+      return false;
     } catch (e) {
       print('❌ Error updating location: $e');
+      return false;
     }
   }
 
@@ -239,6 +229,22 @@ class LocationService {
       return response.statusCode == 201;
     } catch (e) {
       print('Error creating geofence: $e');
+      return false;
+    }
+  }
+
+  /// Delete a safe zone (parent only)
+  Future<bool> deleteGeofence(String geofenceId) async {
+    try {
+      final token = await ApiService().getToken();
+      if (token == null) throw Exception('Not authenticated');
+      final response = await http.delete(
+        Uri.parse('${ApiConstants.baseUrl}/api/location/geofence/$geofenceId'),
+        headers: {'Authorization': 'Bearer $token'},
+      );
+      return response.statusCode == 200;
+    } catch (e) {
+      print('Error deleting geofence: $e');
       return false;
     }
   }

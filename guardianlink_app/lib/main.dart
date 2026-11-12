@@ -4,6 +4,8 @@ import 'package:provider/provider.dart';
 import 'core/services/auth_provider.dart';
 import 'core/providers/theme_provider.dart';
 import 'core/services/fcm_service.dart';
+import 'core/services/api_service.dart';
+import 'core/navigation.dart';
 import 'core/constants/app_theme.dart';
 import 'features/auth/screens/login_screen.dart';
 import 'features/auth/screens/register_screen.dart';
@@ -12,16 +14,21 @@ import 'features/child/screens/child_home_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  
+
   try {
     await Firebase.initializeApp();
-    // Initialize FCM for push notifications
-    await FCMService().initialize();
   } catch (e) {
-    print('Firebase initialization error: $e');
+    // App still works without Firebase; only push notifications are disabled.
+    debugPrint('Firebase initialization error: $e');
   }
-  
+
+  // Lets the native browsing monitor find the backend.
+  await ApiService().persistConfigForNative();
+
   runApp(const MyApp());
+
+  // Not awaited: the notification-permission dialog must not block startup.
+  FCMService().initialize();
 }
 
 class MyApp extends StatelessWidget {
@@ -37,6 +44,8 @@ class MyApp extends StatelessWidget {
       child: Consumer<ThemeProvider>(
         builder: (context, themeProvider, _) {
           return MaterialApp(
+            navigatorKey: navigatorKey,
+            scaffoldMessengerKey: scaffoldMessengerKey,
             title: 'GuardianLink',
             debugShowCheckedModeBanner: false,
             theme: AppTheme.lightTheme,

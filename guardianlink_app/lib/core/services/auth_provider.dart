@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import '../services/api_service.dart';
+import '../services/fcm_service.dart';
+import '../services/location_tracker.dart';
 import '../../models/user_model.dart';
 
 class AuthProvider extends ChangeNotifier {
@@ -68,6 +70,7 @@ class AuthProvider extends ChangeNotifier {
       _error = null;
       _isLoading = false;
       notifyListeners();
+      FCMService().syncTokenWithBackend();
       return true;
     } catch (e) {
       _error = _extractErrorMessage(e);
@@ -99,6 +102,7 @@ class AuthProvider extends ChangeNotifier {
       _error = null;
       _isLoading = false;
       notifyListeners();
+      FCMService().syncTokenWithBackend();
       return true;
     } catch (e) {
       _error = _extractErrorMessage(e);
@@ -111,6 +115,9 @@ class AuthProvider extends ChangeNotifier {
 
   // Logout
   Future<void> logout() async {
+    // Order matters: unregistering this device needs the auth token.
+    await FCMService().unregisterFromBackend();
+    await LocationTracker().stop();
     await _apiService.clearToken();
     _currentUser = null;
     notifyListeners();
@@ -122,6 +129,7 @@ class AuthProvider extends ChangeNotifier {
       final token = await _apiService.getToken();
       if (token != null) {
         _currentUser = await _apiService.getCurrentUser();
+        FCMService().syncTokenWithBackend();
       }
     } catch (e) {
       await _apiService.clearToken();

@@ -26,6 +26,17 @@ class ApiService {
     _token = token;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('auth_token', token);
+    await persistConfigForNative();
+  }
+
+  /// The native browsing monitor (BrowserMonitorService.kt) uploads on its own,
+  /// so it reads the token ('auth_token') and the backend address from
+  /// shared preferences.
+  Future<void> persistConfigForNative() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('api_base_url', ApiConstants.baseUrl);
+    } catch (_) {}
   }
 
   // Clear token
@@ -33,6 +44,20 @@ class ApiService {
     _token = null;
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('auth_token');
+  }
+
+  // Pull FastAPI's {"detail": ...} message out of an error body.
+  String _errorDetail(String body, String fallback) {
+    try {
+      final decoded = jsonDecode(body);
+      final detail = decoded is Map ? decoded['detail'] : null;
+      if (detail is String && detail.isNotEmpty) return detail;
+      if (detail is List && detail.isNotEmpty) {
+        final first = detail.first;
+        if (first is Map && first['msg'] != null) return first['msg'].toString();
+      }
+    } catch (_) {}
+    return fallback;
   }
 
   // Get headers with auth token
@@ -68,9 +93,10 @@ class ApiService {
         await saveToken(data['access_token']);
         return data;
       } else {
-        throw Exception('Registration failed: ${response.body}');
+        throw Exception(_errorDetail(response.body, 'Registration failed'));
       }
     } catch (e) {
+      if (e is Exception && e.toString().startsWith('Exception: ')) rethrow;
       throw Exception('Registration error: $e');
     }
   }
@@ -175,7 +201,7 @@ class ApiService {
           'assigned_to': assignedTo,
           'priority': priority,
           'reward_coins': rewardCoins,
-          if (dueDate != null) 'due_date': dueDate.toIso8601String(),
+          if (dueDate != null) 'due_date': dueDate.toUtc().toIso8601String(),
         }),
       );
 
@@ -235,7 +261,7 @@ class ApiService {
       final response = await http.post(
         Uri.parse('${ApiConstants.baseUrl}/api/tasks/schedule/$taskId'),
         headers: headers,
-        body: jsonEncode({'scheduled_for': scheduledTime.toIso8601String()}),
+        body: jsonEncode({'scheduled_for': scheduledTime.toUtc().toIso8601String()}),
       );
       
       if (response.statusCode != 200) {
@@ -442,6 +468,102 @@ class ApiService {
       print('Get location history exception: $e');
       return [];
     }
+  }
+
+  // ------------------------------------------------------------------ //
+  // Task review (parent)
+  // ------------------------------------------------------------------ //
+  Future<void> verifyTask(String taskId, {required bool approved, String? feedback}) async {
+    final response = await http.post(
+      Uri.parse('${ApiConstants.baseUrl}${ApiConstants.verifyTask}'),
+      headers: await _getHeaders(),
+      body: jsonEncode({
+        'task_id': taskId,
+        'approved': approved,
+        if (feedback != null && feedback.trim().isNotEmpty) 'feedback': feedback.trim(),
+      }),
+    );
+    if (response.statusCode != 200) {
+      throw Exception(_errorDetail(response.body, 'Failed to review task'));
+    }
+  }
+
+  // ------------------------------------------------------------------ //
+  // FCM device unregistration (logout)
+  // ------------------------------------------------------------------ //
+  Future<void> removeFCMToken(String fcmToken) async {
+    try {
+      await http.post(
+        Uri.parse('${ApiConstants.baseUrl}${ApiConstants.fcmTokenRemove}'),
+        headers: await _getHeaders(),
+        body: jsonEncode({'fcm_token': fcmToken}),
+      );
+    } catch (e) {
+      print('Remove FCM token exception: $e');
+    }
+  }
+
+  // ------------------------------------------------------------------ //
+  // SOS and alerts
+  // ------------------------------------------------------------------ //
+  /// Child sends an SOS. Location is optional (backend falls back to the last known one).
+  Future<Map<String, dynamic>> triggerSOS({
+    double? latitude,
+    double? longitude,
+    double? accuracy,
+    String? message,
+  }) async {
+    final response = await http.post(
+      Uri.parse('${ApiConstants.baseUrl}${ApiConstants.sos}'),
+      headers: await _getHeaders(),
+      body: jsonEncode({
+        if (latitude != null) 'latitude': latitude,
+        if (longitude != null) 'longitude': longitude,
+        if (accuracy != null) 'accuracy': accuracy,
+        if (message != null && message.trim().isNotEmpty) 'message': message.trim(),
+      }),
+    ).timeout(const Duration(seconds: 20));
+    if (response.statusCode == 201 || response.statusCode == 200) {
+      return Map<String, dynamic>.from(jsonDecode(response.body));
+    }
+    throw Exception(_errorDetail(response.body, 'Failed to send SOS'));
+  }
+
+  /// Parent: {sos: [...], geofence_events: [...], active_sos_count: n}
+  Future<Map<String, dynamic>> getAlerts({int days = 7}) async {
+    final response = await http.get(
+      Uri.parse('${ApiConstants.baseUrl}${ApiConstants.alerts}?days=$days'),
+      headers: await _getHeaders(),
+    );
+    if (response.statusCode == 200) {
+      return Map<String, dynamic>.from(await JsonParser.parseJson(response.body));
+    }
+    throw Exception(_errorDetail(response.body, 'Failed to load alerts'));
+  }
+
+  Future<void> resolveSOS(String alertId) async {
+    final response = await http.post(
+      Uri.parse('${ApiConstants.baseUrl}${ApiConstants.sos}/$alertId/resolve'),
+      headers: await _getHeaders(),
+    );
+    if (response.statusCode != 200) {
+      throw Exception(_errorDetail(response.body, 'Failed to resolve alert'));
+    }
+  }
+
+  // ------------------------------------------------------------------ //
+  // Browsing history (parent)
+  // ------------------------------------------------------------------ //
+  Future<List<Map<String, dynamic>>> getBrowsingHistory(String childId, {int days = 7}) async {
+    final response = await http.get(
+      Uri.parse('${ApiConstants.baseUrl}${ApiConstants.browsingHistory}/$childId?days=$days'),
+      headers: await _getHeaders(),
+    );
+    if (response.statusCode == 200) {
+      final List<dynamic> data = await JsonParser.parseJson(response.body);
+      return data.map((e) => Map<String, dynamic>.from(e)).toList();
+    }
+    throw Exception(_errorDetail(response.body, 'Failed to load browsing history'));
   }
 
   // Get child's check-in history (parent only)
